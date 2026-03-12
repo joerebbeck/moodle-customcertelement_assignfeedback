@@ -17,6 +17,10 @@
 /**
  * Assignment feedback element for mod_customcert.
  *
+ * Compatible with:
+ *  - Moodle 4.1 - 5.1  : legacy element API (render_form_elements etc.)
+ *  - Moodle 5.2+        : Element System v2 interfaces
+ *
  * @package   customcertelement_assignfeedback
  * @copyright 2026 Joe Rebbeck <tjr@the-ela.com>
  * @license   https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
@@ -28,28 +32,102 @@ defined('MOODLE_INTERNAL') || die();
 
 /**
  * Assignment feedback element class.
+ *
+ * Implements Element System v2 interfaces where available (mod_customcert 5.2+)
+ * while remaining compatible with the legacy API on older versions.
+ *
+ * Interfaces implemented (all are no-ops on older mod_customcert versions that
+ * do not define them, so the class is safely autoloaded on Moodle 4.1+):
+ *  - form_buildable_interface     -> build_form()
+ *  - validatable_element_interface -> validate_form_data()
+ *  - persistable_element_interface -> persist_form_data()
+ *  - preparable_form_interface    -> prepare_form_data()
  */
-class element extends \mod_customcert\element {
+class element extends \mod_customcert\element implements
+    \mod_customcert\element\form_buildable_interface,
+    \mod_customcert\element\validatable_element_interface,
+    \mod_customcert\element\persistable_element_interface,
+    \mod_customcert\element\preparable_form_interface {
+
+    // =========================================================================
+    // Element System v2 interface methods (mod_customcert 5.2+)
+    // =========================================================================
 
     /**
-     * Renders the form elements for this element.
+     * Adds the element-specific fields to the form (v2 API).
      *
-     * @param \MoodleQuickForm $mform The form being rendered.
+     * Called by mod_customcert 5.2+ instead of render_form_elements().
+     *
+     * @param \MoodleQuickForm $mform The Moodle form.
      */
-    public function render_form_elements($mform) {
+    public function build_form(\MoodleQuickForm $mform): void {
         global $COURSE;
 
         $assignments = $this->get_course_assignments($COURSE->id);
         $options = [0 => get_string('chooseassignment', 'customcertelement_assignfeedback')] + $assignments;
 
-        $mform->addElement('select', 'assignid', get_string('assignment', 'customcertelement_assignfeedback'), $options);
+        $mform->addElement('select', 'assignid',
+            get_string('assignment', 'customcertelement_assignfeedback'), $options);
         $mform->setType('assignid', PARAM_INT);
+    }
 
+    /**
+     * Validates the submitted form data (v2 API).
+     *
+     * @param array $data  Submitted form data.
+     * @param array $files Uploaded files.
+     * @return array Associative array of field => error string.
+     */
+    public function validate_form_data(array $data, array $files): array {
+        $errors = [];
+        if (empty($data['assignid'])) {
+            $errors['assignid'] = get_string('required');
+        }
+        return $errors;
+    }
+
+    /**
+     * Persists the form data to the element record (v2 API).
+     *
+     * Always stores as a JSON object payload, as required by the v2 spec.
+     *
+     * @param \stdClass $data Submitted form data.
+     */
+    public function persist_form_data(\stdClass $data): void {
+        $this->set_data(json_encode(['assignid' => (int) $data->assignid]));
+        parent::persist_form_data($data);
+    }
+
+    /**
+     * Pre-populates the form with the saved element data (v2 API).
+     *
+     * @param \MoodleQuickForm $mform The Moodle form.
+     */
+    public function prepare_form_data(\MoodleQuickForm $mform): void {
+        $data = json_decode($this->get_data(), true);
+        if (!empty($data['assignid'])) {
+            $mform->setDefault('assignid', $data['assignid']);
+        }
+        parent::prepare_form_data($mform);
+    }
+
+    // =========================================================================
+    // Legacy API methods (mod_customcert 4.1 - 5.1)
+    // Delegate to the v2 methods so logic is never duplicated.
+    // =========================================================================
+
+    /**
+     * Renders the form elements for this element (legacy API).
+     *
+     * @param \MoodleQuickForm $mform The form being rendered.
+     */
+    public function render_form_elements($mform) {
+        $this->build_form($mform);
         parent::render_form_elements($mform);
     }
 
     /**
-     * Validates form data for this element.
+     * Validates form data for this element (legacy API).
      *
      * @param array $data  The form data.
      * @param array $files The uploaded files.
@@ -57,16 +135,11 @@ class element extends \mod_customcert\element {
      */
     public function validate_form_elements($data, $files) {
         $errors = parent::validate_form_elements($data, $files);
-
-        if (empty($data['assignid'])) {
-            $errors['assignid'] = get_string('required');
-        }
-
-        return $errors;
+        return array_merge($errors, $this->validate_form_data($data, $files));
     }
 
     /**
-     * Saves the form data for this element.
+     * Saves the form data for this element (legacy API).
      *
      * @param \stdClass $data The form data.
      */
@@ -76,7 +149,7 @@ class element extends \mod_customcert\element {
     }
 
     /**
-     * Populates the form with the saved element data.
+     * Populates the form with the saved element data (legacy API).
      *
      * @param \MoodleQuickForm $mform The form being rendered.
      */
@@ -87,6 +160,10 @@ class element extends \mod_customcert\element {
         }
         parent::set_form_elements_data($mform);
     }
+
+    // =========================================================================
+    // Render / preview (unchanged across v1 and v2)
+    // =========================================================================
 
     /**
      * Returns a sample string for the PDF preview.
@@ -100,10 +177,10 @@ class element extends \mod_customcert\element {
     /**
      * Renders this element on the PDF certificate.
      *
-     * @param \pdf         $pdf  The PDF object.
-     * @param bool         $preview Whether this is a preview render.
-     * @param \stdClass    $user The user the certificate is being generated for.
-     * @param \stdClass    $record The customcert issue record.
+     * @param \pdf      $pdf     The PDF object.
+     * @param bool      $preview Whether this is a preview render.
+     * @param \stdClass $user    The user the certificate is being generated for.
+     * @param \stdClass $record  The customcert issue record.
      */
     public function render($pdf, $preview, $user, $record) {
         if ($preview) {
@@ -112,17 +189,21 @@ class element extends \mod_customcert\element {
         }
 
         $elementdata = json_decode($this->get_data(), true);
-        $assignid = (int) ($elementdata['assignid'] ?? 0);
-        $feedback = $this->get_feedback_for_user($assignid, $user->id);
+        $assignid    = (int) ($elementdata['assignid'] ?? 0);
+        $feedback    = $this->get_feedback_for_user($assignid, $user->id);
 
         \mod_customcert\element_helper::render_content($pdf, $this, $feedback);
     }
+
+    // =========================================================================
+    // Internal helpers
+    // =========================================================================
 
     /**
      * Retrieves the grader's text feedback for a user on a given assignment.
      *
      * Looks up the grade record first, then fetches the associated
-     * assignfeedback_comments row. Returns a localised fallback string
+     * assignfeedback_comments row.  Returns a localised fallback string
      * if no grade or feedback comment is found.
      *
      * @param int $assignid The assignment ID.
@@ -162,7 +243,7 @@ class element extends \mod_customcert\element {
     }
 
     /**
-     * Returns an array of assignment names keyed by assignment ID for a given course.
+     * Returns an array of assignment names keyed by assignment ID for a course.
      *
      * @param int $courseid The course ID.
      * @return array Associative array of assignment ID => assignment name.
@@ -171,7 +252,7 @@ class element extends \mod_customcert\element {
         global $DB;
 
         $records = $DB->get_records('assign', ['course' => $courseid], 'name ASC', 'id, name');
-        $result = [];
+        $result  = [];
         foreach ($records as $record) {
             $result[$record->id] = $record->name;
         }
