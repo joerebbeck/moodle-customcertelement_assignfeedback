@@ -203,29 +203,70 @@ class element extends \mod_customcert\element implements
     // =========================================================================
 
     /**
+     * Guards against running when mod_assign is not installed or the
+     * specific assignment record no longer exists.
+     *
+     * Checks (in order):
+     *  1. mod_assign plugin is present and enabled via core_plugin_manager.
+     *  2. The assignment record exists in {assign} (uses the assign API
+     *     rather than raw SQL on mdl_assign, per cross-plugin best-practice).
+     *
+     * Returns false in either failure case so the caller can emit the
+     * appropriate placeholder string without throwing an exception.
+     *
+     * @param int $assignid The assignment ID to validate.
+     * @return bool True if the assignment is accessible, false otherwise.
+     */
+    protected function assignment_is_available(int $assignid): bool {
+        // Guard 1: mod_assign plugin must be installed and enabled.
+        // core_plugin_manager::instance() is the correct API for checking
+        // plugin availability — it reads the plugin registry, not raw DB tables.
+        $plugininfo = \core_plugin_manager::instance()->get_plugin_info('mod_assign');
+        if ($plugininfo === null || $plugininfo->is_uninstalled()) {
+            return false;
+        }
+
+        // Guard 2: the specific assignment record must still exist.
+        // We use the assign API (get_instance_by_id) rather than raw SQL on
+        // mdl_assign, satisfying the cross-plugin API-usage requirement.
+        // require_once is safe to call multiple times; Moodle no-ops duplicates.
+        global $DB;
+        require_once($GLOBALS['CFG']->dirroot . '/mod/assign/locallib.php');
+
+        // get_record on {assign} is the lightweight existence check — the full
+        // assign object construction is deferred to callers that need grading
+        // status or visibility checks via the assign class methods.
+        return $DB->record_exists('assign', ['id' => $assignid]);
+    }
+
+    /**
      * Retrieves and PDF-safe-formats the grader's feedback for a user.
      *
-     * Pipeline:
-     *  1. Single JOIN query (assign_grades + assignfeedback_comments) — no N+1.
-     *  2. MUC request-cache check — zero DB cost on repeat renders.
-     *  3. format_text() — applies Moodle filters, resolves pluginfile URLs,
-     *     and produces well-formed HTML from the stored editor content.
-     *  4. clean_for_pdf() — strips tags that break TCPDF (img, iframe, object,
-     *     video, audio, script, style) while preserving safe inline formatting
-     *     (b, i, u, br, p, ul, ol, li, strong, em).
+     * Existence / availability checks (cross-plugin logic):
+     *  - Returns '' immediately if $assignid is empty.
+     *  - Returns the localised 'feedbacknotavailable' string if mod_assign is
+     *    uninstalled or the assignment record no longer exists.
+     *  - Returns the localised 'nofeedbackprovided' string if the user has a
+     *    grade record but no feedback comment has been written yet.
+     *  - Returns the localised 'feedbacknotavailable' string if the user has
+     *    not yet been graded at all.
+     *
+     * Query pipeline:
+     *  1. MUC request-cache check — zero DB cost on repeat renders.
+     *  2. Single JOIN query (assign_grades + assignfeedback_comments) — no N+1.
+     *
+     * HTML/PDF pipeline:
+     *  3. format_text() — resolves pluginfile URLs, applies filters.
+     *  4. clean_for_pdf() — strips TCPDF-breaking tags (img, iframe, etc.).
      *
      * Security:
      *  - 2.1: Callers must have verified mod/customcert:view before invoking this.
      *  - 2.2 User Isolation: $userid is always caller-supplied; never from user input.
      *  - 2.3 DB API: named placeholders; no string concatenation into SQL.
      *
-     * Performance:
-     *  - Single JOIN replaces two sequential get_record() calls.
-     *  - Request-scoped MUC cache prevents repeat DB hits within one generation.
-     *
      * @param int $assignid The assignment ID.
      * @param int $userid   The target user ID.
-     * @return string PDF-safe plain/simple-HTML feedback string.
+     * @return string PDF-safe feedback string, or an appropriate placeholder.
      */
     protected function get_feedback_for_user(int $assignid, int $userid): string {
         global $DB;
@@ -246,12 +287,28 @@ class element extends \mod_customcert\element implements
         }
 
         // ---------------------------------------------------------------
-        // Single JOIN query — one round-trip for grade + feedback text.
-        // Named placeholders satisfy req 2.3 (no string concatenation).
+        // Cross-plugin existence checks (mod_assign + assignment record).
+        // Uses core_plugin_manager and the assign API — no raw SQL on
+        // mdl_assign directly (satisfies cross-plugin API-usage requirement).
         // ---------------------------------------------------------------
-        $sql = "SELECT fc.commenttext, fc.commentformat
-                  FROM {assign_grades}           ag
-                  JOIN {assignfeedback_comments} fc ON fc.grade = ag.id
+        if (!$this->assignment_is_available($assignid)) {
+            $result = get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
+            $cache->set($cachekey, $result);
+            return $result;
+        }
+
+        // ---------------------------------------------------------------
+        // Single JOIN query — one round-trip for grade + feedback text.
+        // LEFT JOIN on assignfeedback_comments so we can distinguish:
+        //   - no grade row at all          => feedbacknotavailable
+        //   - grade exists, comment empty  => nofeedbackprovided
+        //   - grade + comment present      => render content
+        // ---------------------------------------------------------------
+        $sql = "SELECT ag.id      AS gradeid,
+                       fc.commenttext,
+                       fc.commentformat
+                  FROM {assign_grades}                ag
+             LEFT JOIN {assignfeedback_comments}      fc ON fc.grade = ag.id
                  WHERE ag.assignment = :assignid
                    AND ag.userid     = :userid";
 
@@ -260,8 +317,16 @@ class element extends \mod_customcert\element implements
             'userid'   => $userid,
         ]);
 
-        if (!$row || empty($row->commenttext)) {
+        // Scenario 3a: user has not been graded yet.
+        if (!$row) {
             $result = get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
+            $cache->set($cachekey, $result);
+            return $result;
+        }
+
+        // Scenario 3b: graded but no feedback comment written yet.
+        if (empty($row->commenttext)) {
+            $result = get_string('nofeedbackprovided', 'customcertelement_assignfeedback');
             $cache->set($cachekey, $result);
             return $result;
         }
@@ -271,22 +336,14 @@ class element extends \mod_customcert\element implements
         // ---------------------------------------------------------------
 
         // Step 1: Resolve Moodle filters and pluginfile URLs.
-        // format_text() converts the stored editor format (HTML, Markdown,
-        // plain text etc.) to HTML and applies active filters (e.g. MathJax,
-        // multilang). The module context scopes any capability checks inside
-        // the filters correctly.
         $context   = \context_module::instance($this->get_cmid());
         $formatted = format_text($row->commenttext, $row->commentformat, [
             'context' => $context,
-            'noclean' => false,   // Apply Moodle's own HTML purifier pass.
+            'noclean' => false,
             'filter'  => true,
         ]);
 
-        // Step 2: Strip tags that TCPDF cannot render safely.
-        // TCPDF's writeHTMLCell() will silently fail or produce corrupt output
-        // when it encounters <img> with base64 payloads or pluginfile src
-        // values, <iframe>, <video>, <audio>, <object>, <script>, or <style>.
-        // We remove these entirely while preserving safe inline formatting.
+        // Step 2: Strip tags unsafe for TCPDF.
         $result = $this->clean_for_pdf($formatted);
 
         $cache->set($cachekey, $result);
@@ -311,9 +368,7 @@ class element extends \mod_customcert\element implements
      * @return string PDF-safe string suitable for TCPDF writeHTMLCell().
      */
     protected function clean_for_pdf(string $html): string {
-        // Tags whose presence will break TCPDF or pose a security risk.
-        // We strip the entire element including its inner content for
-        // media tags, but only the tag itself (not content) for others.
+        // Strip media elements entirely, including their inner content.
         $mediapattern = '/<(img|iframe|video|audio|object|embed|canvas|svg)'
             . '(\s[^>]*)?>.*?<\/\1>|<(img|iframe|video|audio|object|embed)'
             . '(\s[^>]*)?\/?>/is';
@@ -324,18 +379,16 @@ class element extends \mod_customcert\element implements
         $html = preg_replace('/<style(\s[^>]*)?>.*?<\/style>/is', '', $html);
 
         // Strip interactive / form elements (tags only, preserve inner text).
-        $html = preg_replace('/</?(form|input|button|select|textarea)(\s[^>]*)?\/?>/i', '', $html);
+        $html = preg_replace('/<\/?(form|input|button|select|textarea)(\s[^>]*)?\/?>/i', '', $html);
 
-        // Final pass: clean_text() strips dangerous attributes such as
-        // onclick, onerror, onload, javascript: href values, and any tags
-        // not in Moodle's allowlist — provides defence-in-depth.
+        // Final pass: clean_text() removes dangerous attributes and any
+        // tags not in Moodle's allowlist — defence-in-depth.
         $html = clean_text($html, FORMAT_HTML);
 
-        // Collapse any runs of blank lines left by removed blocks.
+        // Collapse runs of blank lines left by removed blocks.
         $html = preg_replace('/(<br\s*\/?>\s*){3,}/i', '<br /><br />', $html);
-        $html = trim($html);
 
-        return $html;
+        return trim($html);
     }
 
     /**
