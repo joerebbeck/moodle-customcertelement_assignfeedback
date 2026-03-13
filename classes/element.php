@@ -205,17 +205,17 @@ class element extends \mod_customcert\element implements
     /**
      * Retrieves the grader's text feedback for a user on a given assignment.
      *
-     * Looks up the grade record first, then fetches the associated
-     * assignfeedback_comments row. Returns a localised fallback string
-     * if no grade or feedback comment is found.
+     * Performance: uses a single JOIN query across assign_grades and
+     * assignfeedback_comments, avoiding the N+1 pattern of querying each
+     * table separately. Result is cached in the Moodle Universal Cache (MUC)
+     * for the duration of the request to avoid redundant hits when the same
+     * feedback is rendered by multiple certificate elements in one generation.
      *
      * Security:
      *  - Callers must have verified mod/customcert:view before invoking this.
      *  - 2.2 User Isolation: $userid is always caller-supplied; never sourced
      *    from $_GET, $_POST, or any other user-controlled input.
-     *  - 2.3 DB API: Uses Moodle $DB API with array conditions throughout.
-     *    Array conditions are compiled to parameterised SQL by the DML layer -
-     *    no string concatenation into SQL strings anywhere in this method.
+     *  - 2.3 DB API: named placeholders throughout; no string concatenation.
      *
      * @param int $assignid The assignment ID.
      * @param int $userid   The target user ID.
@@ -228,29 +228,44 @@ class element extends \mod_customcert\element implements
             return '';
         }
 
-        // Verify the assignment exists - $DB array conditions, no raw SQL.
-        if (!$DB->record_exists('assign', ['id' => $assignid])) {
-            return '';
+        // ---------------------------------------------------------------
+        // MUC cache: avoid redundant DB hits within a single page request.
+        // The 'request' store is in-process only — no stale-data risk.
+        // ---------------------------------------------------------------
+        $cache    = \cache::make('customcertelement_assignfeedback', 'feedbackcache');
+        $cachekey = "feedback_{$assignid}_{$userid}";
+        $cached   = $cache->get($cachekey);
+
+        if ($cached !== false) {
+            return $cached;
         }
 
-        // Strict per-user, per-assignment filter - satisfies req 2.2 and 2.3.
-        $grade = $DB->get_record('assign_grades', [
-            'assignment' => $assignid,
-            'userid'     => $userid,
+        // ---------------------------------------------------------------
+        // Single JOIN query — eliminates the previous N+1 pattern of
+        // calling get_record('assign_grades') then get_record('assignfeedback_comments')
+        // as two separate round-trips for every element render.
+        // ---------------------------------------------------------------
+        $sql = "SELECT fc.commenttext
+                  FROM {assign_grades}           ag
+                  JOIN {assignfeedback_comments} fc ON fc.grade = ag.id
+                 WHERE ag.assignment = :assignid
+                   AND ag.userid     = :userid";
+
+        $row = $DB->get_record_sql($sql, [
+            'assignid' => $assignid,
+            'userid'   => $userid,
         ]);
 
-        if (!$grade) {
-            return get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
+        if (!$row || empty($row->commenttext)) {
+            // Also cache the miss so repeat renders skip the DB entirely.
+            $result = get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
+        } else {
+            $result = strip_tags($row->commenttext);
         }
 
-        // Fetch the feedback comment linked to this specific grade row.
-        $comment = $DB->get_record('assignfeedback_comments', ['grade' => $grade->id]);
+        $cache->set($cachekey, $result);
 
-        if (!$comment || empty($comment->commenttext)) {
-            return get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
-        }
-
-        return strip_tags($comment->commenttext);
+        return $result;
     }
 
     /**
