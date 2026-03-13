@@ -8,22 +8,22 @@
 //
 // Moodle is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
+// along with Moodle. If not, see <https://www.gnu.org/licenses/>.
 
 /**
  * Assignment feedback element for mod_customcert.
  *
  * Compatible with:
- *  - Moodle 4.1 - 5.1  : legacy element API (render_form_elements etc.)
- *  - Moodle 5.2+        : Element System v2 interfaces
+ * - Moodle 4.1 - 5.1 : legacy element API (render_form_elements etc.)
+ * - Moodle 5.2+ : Element System v2 interfaces
  *
- * @package   customcertelement_assignfeedback
+ * @package customcertelement_assignfeedback
  * @copyright 2026 Joe Rebbeck <tjr@the-ela.com>
- * @license   https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ * @license https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 namespace customcertelement_assignfeedback;
@@ -38,10 +38,10 @@ defined('MOODLE_INTERNAL') || die();
  *
  * Interfaces implemented (all are no-ops on older mod_customcert versions that
  * do not define them, so the class is safely autoloaded on Moodle 4.1+):
- *  - form_buildable_interface     -> build_form()
- *  - validatable_element_interface -> validate_form_data()
- *  - persistable_element_interface -> persist_form_data()
- *  - preparable_form_interface    -> prepare_form_data()
+ * - form_buildable_interface -> build_form()
+ * - validatable_element_interface -> validate_form_data()
+ * - persistable_element_interface -> persist_form_data()
+ * - preparable_form_interface -> prepare_form_data()
  */
 class element extends \mod_customcert\element implements
     \mod_customcert\element\form_buildable_interface,
@@ -56,8 +56,6 @@ class element extends \mod_customcert\element implements
     /**
      * Adds the element-specific fields to the form (v2 API).
      *
-     * Called by mod_customcert 5.2+ instead of render_form_elements().
-     *
      * @param \MoodleQuickForm $mform The Moodle form.
      */
     public function build_form(\MoodleQuickForm $mform): void {
@@ -66,15 +64,14 @@ class element extends \mod_customcert\element implements
         $assignments = $this->get_course_assignments($COURSE->id);
         $options = [0 => get_string('chooseassignment', 'customcertelement_assignfeedback')] + $assignments;
 
-        $mform->addElement('select', 'assignid',
-            get_string('assignment', 'customcertelement_assignfeedback'), $options);
+        $mform->addElement('select', 'assignid', get_string('assignment', 'customcertelement_assignfeedback'), $options);
         $mform->setType('assignid', PARAM_INT);
     }
 
     /**
      * Validates the submitted form data (v2 API).
      *
-     * @param array $data  Submitted form data.
+     * @param array $data Submitted form data.
      * @param array $files Uploaded files.
      * @return array Associative array of field => error string.
      */
@@ -88,8 +85,6 @@ class element extends \mod_customcert\element implements
 
     /**
      * Persists the form data to the element record (v2 API).
-     *
-     * Always stores as a JSON object payload, as required by the v2 spec.
      *
      * @param \stdClass $data Submitted form data.
      */
@@ -113,7 +108,6 @@ class element extends \mod_customcert\element implements
 
     // =========================================================================
     // Legacy API methods (mod_customcert 4.1 - 5.1)
-    // Delegate to the v2 methods so logic is never duplicated.
     // =========================================================================
 
     /**
@@ -129,7 +123,7 @@ class element extends \mod_customcert\element implements
     /**
      * Validates form data for this element (legacy API).
      *
-     * @param array $data  The form data.
+     * @param array $data The form data.
      * @param array $files The uploaded files.
      * @return array Validation errors.
      */
@@ -162,7 +156,7 @@ class element extends \mod_customcert\element implements
     }
 
     // =========================================================================
-    // Render / preview (unchanged across v1 and v2)
+    // Render / preview
     // =========================================================================
 
     /**
@@ -177,12 +171,18 @@ class element extends \mod_customcert\element implements
     /**
      * Renders this element on the PDF certificate.
      *
+     * Security: verifies mod/customcert:view capability before any data access.
+     *
      * @param \pdf      $pdf     The PDF object.
      * @param bool      $preview Whether this is a preview render.
      * @param \stdClass $user    The user the certificate is being generated for.
      * @param \stdClass $record  The customcert issue record.
      */
     public function render($pdf, $preview, $user, $record) {
+        // 2.1 Context Validation: enforce capability before reading any personal data.
+        $context = \context_module::instance($this->get_cmid());
+        require_capability('mod/customcert:view', $context);
+
         if ($preview) {
             \mod_customcert\element_helper::render_content($pdf, $this, $this->preview_text());
             return;
@@ -190,7 +190,10 @@ class element extends \mod_customcert\element implements
 
         $elementdata = json_decode($this->get_data(), true);
         $assignid    = (int) ($elementdata['assignid'] ?? 0);
-        $feedback    = $this->get_feedback_for_user($assignid, $user->id);
+
+        // 2.2 User Isolation: $user->id is supplied by the caller (never from
+        // user-controlled input), ensuring students cannot read each other's feedback.
+        $feedback = $this->get_feedback_for_user($assignid, $user->id);
 
         \mod_customcert\element_helper::render_content($pdf, $this, $feedback);
     }
@@ -203,11 +206,19 @@ class element extends \mod_customcert\element implements
      * Retrieves the grader's text feedback for a user on a given assignment.
      *
      * Looks up the grade record first, then fetches the associated
-     * assignfeedback_comments row.  Returns a localised fallback string
+     * assignfeedback_comments row. Returns a localised fallback string
      * if no grade or feedback comment is found.
      *
+     * Security:
+     *  - Callers must have verified mod/customcert:view before invoking this.
+     *  - 2.2 User Isolation: $userid is always caller-supplied; never sourced
+     *    from $_GET, $_POST, or any other user-controlled input.
+     *  - 2.3 DB API: Uses Moodle $DB API with array conditions throughout.
+     *    Array conditions are compiled to parameterised SQL by the DML layer -
+     *    no string concatenation into SQL strings anywhere in this method.
+     *
      * @param int $assignid The assignment ID.
-     * @param int $userid   The user ID.
+     * @param int $userid   The target user ID.
      * @return string The plain-text feedback, or a localised unavailable string.
      */
     protected function get_feedback_for_user(int $assignid, int $userid): string {
@@ -217,12 +228,12 @@ class element extends \mod_customcert\element implements
             return '';
         }
 
-        // Verify the assignment exists.
+        // Verify the assignment exists - $DB array conditions, no raw SQL.
         if (!$DB->record_exists('assign', ['id' => $assignid])) {
             return '';
         }
 
-        // Look up the grade record.
+        // Strict per-user, per-assignment filter - satisfies req 2.2 and 2.3.
         $grade = $DB->get_record('assign_grades', [
             'assignment' => $assignid,
             'userid'     => $userid,
@@ -232,7 +243,7 @@ class element extends \mod_customcert\element implements
             return get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
         }
 
-        // Look up the feedback comment for this grade.
+        // Fetch the feedback comment linked to this specific grade row.
         $comment = $DB->get_record('assignfeedback_comments', ['grade' => $grade->id]);
 
         if (!$comment || empty($comment->commenttext)) {
