@@ -25,9 +25,24 @@
 defined('MOODLE_INTERNAL') || die();
 
 // Core element strings.
-$string['pluginname']        = 'Assignment feedback';
+// The plugin is named "Assignment Feedback Comments" (not just "Assignment Feedback")
+// to make clear that only text from the "Feedback comments" sub-plugin is rendered.
+// Other sub-plugins (Annotate PDF, File feedback etc.) are not supported.
+$string['pluginname']        = 'Assignment Feedback Comments';
 $string['assignment']        = 'Assignment';
 $string['chooseassignment']  = 'Choose an assignment...';
+
+// Coupling limitation notice shown in the element configuration form.
+// Explains to instructors that only feedback entered via the "Feedback comments"
+// sub-plugin will appear on the certificate — so they can verify their assignment
+// has that sub-plugin enabled before issuing certificates.
+$string['feedbackcommentsonly'] = '<div class="alert alert-info mt-2 mb-0">'
+    . '<strong>Note:</strong> This element only displays text entered via the '
+    . '<em>Feedback comments</em> sub-plugin. Feedback from <em>Annotate PDF</em>, '
+    . '<em>File feedback</em>, or other sub-plugins will <strong>not</strong> appear '
+    . 'on the certificate. Verify that <em>Feedback comments</em> is enabled on the '
+    . 'chosen assignment (Assignment &rsaquo; Edit settings &rsaquo; Feedback types).'
+    . '</div>';
 
 // Feedback placeholder strings.
 // Shown on the certificate when feedback cannot be rendered.
@@ -37,7 +52,8 @@ $string['chooseassignment']  = 'Choose an assignment...';
 $string['feedbacknotavailable'] = 'Feedback not available';
 
 // Displayed when the user has been graded but the grader has not yet written
-// any feedback comment (commenttext is empty).
+// any feedback comment (commenttext is empty), or when the assignment uses a
+// different feedback sub-plugin (Annotate PDF, File feedback etc.).
 $string['nofeedbackprovided'] = 'No feedback provided';
 
 // Privacy API strings.
