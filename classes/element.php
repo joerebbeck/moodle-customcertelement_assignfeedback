@@ -42,6 +42,28 @@ defined('MOODLE_INTERNAL') || die();
  * - validatable_element_interface -> validate_form_data()
  * - persistable_element_interface -> persist_form_data()
  * - preparable_form_interface -> prepare_form_data()
+ *
+ * COUPLING LIMITATION — Assignment feedback sub-plugin architecture:
+ * ===================================================================
+ * This element only retrieves text from the "Feedback comments" sub-plugin
+ * ({assignfeedback_comments}). Moodle's assignment activity uses a sub-plugin
+ * architecture for feedback types; other sub-plugins such as:
+ *
+ *   - "Annotate PDF"  (assignfeedback_editpdf)
+ *   - "File feedback" (assignfeedback_file)
+ *   - "Offline grading worksheet" (assignfeedback_offline)
+ *
+ * ...are not read by this element and will produce a "No feedback provided"
+ * placeholder on the certificate even when feedback of those types exists.
+ *
+ * This is a deliberate architectural boundary, not a bug. Extending support
+ * for additional feedback sub-plugins would require separate JOIN clauses and
+ * format-specific rendering logic for each type.
+ *
+ * The element is therefore named "Assignment Feedback Comments" (see pluginname
+ * lang string) to set accurate user expectations at configuration time.
+ * The form also displays a static notice when the element is configured.
+ *
  */
 class element extends \mod_customcert\element implements
     \mod_customcert\element\form_buildable_interface,
@@ -66,6 +88,11 @@ class element extends \mod_customcert\element implements
 
         $mform->addElement('select', 'assignid', get_string('assignment', 'customcertelement_assignfeedback'), $options);
         $mform->setType('assignid', PARAM_INT);
+
+        // Coupling notice: inform instructors of the feedback sub-plugin limitation
+        // at configuration time so they understand what will appear on certificates.
+        $mform->addElement('static', 'assignfeedback_notice', '',
+            get_string('feedbackcommentsonly', 'customcertelement_assignfeedback'));
     }
 
     /**
