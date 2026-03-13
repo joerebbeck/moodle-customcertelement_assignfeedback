@@ -203,23 +203,29 @@ class element extends \mod_customcert\element implements
     // =========================================================================
 
     /**
-     * Retrieves the grader's text feedback for a user on a given assignment.
+     * Retrieves and PDF-safe-formats the grader's feedback for a user.
      *
-     * Performance: uses a single JOIN query across assign_grades and
-     * assignfeedback_comments, avoiding the N+1 pattern of querying each
-     * table separately. Result is cached in the Moodle Universal Cache (MUC)
-     * for the duration of the request to avoid redundant hits when the same
-     * feedback is rendered by multiple certificate elements in one generation.
+     * Pipeline:
+     *  1. Single JOIN query (assign_grades + assignfeedback_comments) — no N+1.
+     *  2. MUC request-cache check — zero DB cost on repeat renders.
+     *  3. format_text() — applies Moodle filters, resolves pluginfile URLs,
+     *     and produces well-formed HTML from the stored editor content.
+     *  4. clean_for_pdf() — strips tags that break TCPDF (img, iframe, object,
+     *     video, audio, script, style) while preserving safe inline formatting
+     *     (b, i, u, br, p, ul, ol, li, strong, em).
      *
      * Security:
-     *  - Callers must have verified mod/customcert:view before invoking this.
-     *  - 2.2 User Isolation: $userid is always caller-supplied; never sourced
-     *    from $_GET, $_POST, or any other user-controlled input.
-     *  - 2.3 DB API: named placeholders throughout; no string concatenation.
+     *  - 2.1: Callers must have verified mod/customcert:view before invoking this.
+     *  - 2.2 User Isolation: $userid is always caller-supplied; never from user input.
+     *  - 2.3 DB API: named placeholders; no string concatenation into SQL.
+     *
+     * Performance:
+     *  - Single JOIN replaces two sequential get_record() calls.
+     *  - Request-scoped MUC cache prevents repeat DB hits within one generation.
      *
      * @param int $assignid The assignment ID.
      * @param int $userid   The target user ID.
-     * @return string The plain-text feedback, or a localised unavailable string.
+     * @return string PDF-safe plain/simple-HTML feedback string.
      */
     protected function get_feedback_for_user(int $assignid, int $userid): string {
         global $DB;
@@ -229,8 +235,7 @@ class element extends \mod_customcert\element implements
         }
 
         // ---------------------------------------------------------------
-        // MUC cache: avoid redundant DB hits within a single page request.
-        // The 'request' store is in-process only — no stale-data risk.
+        // MUC request cache — in-process only, purged at request end.
         // ---------------------------------------------------------------
         $cache    = \cache::make('customcertelement_assignfeedback', 'feedbackcache');
         $cachekey = "feedback_{$assignid}_{$userid}";
@@ -241,11 +246,10 @@ class element extends \mod_customcert\element implements
         }
 
         // ---------------------------------------------------------------
-        // Single JOIN query — eliminates the previous N+1 pattern of
-        // calling get_record('assign_grades') then get_record('assignfeedback_comments')
-        // as two separate round-trips for every element render.
+        // Single JOIN query — one round-trip for grade + feedback text.
+        // Named placeholders satisfy req 2.3 (no string concatenation).
         // ---------------------------------------------------------------
-        $sql = "SELECT fc.commenttext
+        $sql = "SELECT fc.commenttext, fc.commentformat
                   FROM {assign_grades}           ag
                   JOIN {assignfeedback_comments} fc ON fc.grade = ag.id
                  WHERE ag.assignment = :assignid
@@ -257,15 +261,81 @@ class element extends \mod_customcert\element implements
         ]);
 
         if (!$row || empty($row->commenttext)) {
-            // Also cache the miss so repeat renders skip the DB entirely.
             $result = get_string('feedbacknotavailable', 'customcertelement_assignfeedback');
-        } else {
-            $result = strip_tags($row->commenttext);
+            $cache->set($cachekey, $result);
+            return $result;
         }
+
+        // ---------------------------------------------------------------
+        // TCPDF HTML cleaning pipeline
+        // ---------------------------------------------------------------
+
+        // Step 1: Resolve Moodle filters and pluginfile URLs.
+        // format_text() converts the stored editor format (HTML, Markdown,
+        // plain text etc.) to HTML and applies active filters (e.g. MathJax,
+        // multilang). The module context scopes any capability checks inside
+        // the filters correctly.
+        $context   = \context_module::instance($this->get_cmid());
+        $formatted = format_text($row->commenttext, $row->commentformat, [
+            'context' => $context,
+            'noclean' => false,   // Apply Moodle's own HTML purifier pass.
+            'filter'  => true,
+        ]);
+
+        // Step 2: Strip tags that TCPDF cannot render safely.
+        // TCPDF's writeHTMLCell() will silently fail or produce corrupt output
+        // when it encounters <img> with base64 payloads or pluginfile src
+        // values, <iframe>, <video>, <audio>, <object>, <script>, or <style>.
+        // We remove these entirely while preserving safe inline formatting.
+        $result = $this->clean_for_pdf($formatted);
 
         $cache->set($cachekey, $result);
 
         return $result;
+    }
+
+    /**
+     * Strips HTML tags that are unsafe or unsupported by TCPDF.
+     *
+     * Removes: img, iframe, video, audio, object, embed, script, style,
+     *          form, input, button, select, textarea, canvas, svg.
+     *
+     * Preserves: b, strong, i, em, u, s, p, br, ul, ol, li, span,
+     *            h1-h6, blockquote, pre, code, sup, sub, hr, table,
+     *            thead, tbody, tr, th, td, caption, a (href only).
+     *
+     * After tag removal, clean_text() is called as a final safety net to
+     * strip any remaining dangerous attributes (e.g. onclick, onerror).
+     *
+     * @param string $html HTML produced by format_text().
+     * @return string PDF-safe string suitable for TCPDF writeHTMLCell().
+     */
+    protected function clean_for_pdf(string $html): string {
+        // Tags whose presence will break TCPDF or pose a security risk.
+        // We strip the entire element including its inner content for
+        // media tags, but only the tag itself (not content) for others.
+        $mediapattern = '/<(img|iframe|video|audio|object|embed|canvas|svg)'
+            . '(\s[^>]*)?>.*?<\/\1>|<(img|iframe|video|audio|object|embed)'
+            . '(\s[^>]*)?\/?>/is';
+        $html = preg_replace($mediapattern, '', $html);
+
+        // Strip script and style blocks with their content.
+        $html = preg_replace('/<script(\s[^>]*)?>.*?<\/script>/is', '', $html);
+        $html = preg_replace('/<style(\s[^>]*)?>.*?<\/style>/is', '', $html);
+
+        // Strip interactive / form elements (tags only, preserve inner text).
+        $html = preg_replace('/</?(form|input|button|select|textarea)(\s[^>]*)?\/?>/i', '', $html);
+
+        // Final pass: clean_text() strips dangerous attributes such as
+        // onclick, onerror, onload, javascript: href values, and any tags
+        // not in Moodle's allowlist — provides defence-in-depth.
+        $html = clean_text($html, FORMAT_HTML);
+
+        // Collapse any runs of blank lines left by removed blocks.
+        $html = preg_replace('/(<br\s*\/?>\s*){3,}/i', '<br /><br />', $html);
+        $html = trim($html);
+
+        return $html;
     }
 
     /**
