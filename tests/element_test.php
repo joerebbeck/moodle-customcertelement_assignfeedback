@@ -154,36 +154,75 @@ class element_test extends \advanced_testcase {
     /**
      * Test that HTML tags are stripped from feedback comments.
      */
-    public function test_html_is_stripped_from_feedback(): void {
-        global $DB;
-        $this->resetAfterTest();
+    /**
+     * Tests that clean_for_pdf() strips dangerous tags that break TCPDF while
+     * preserving safe inline formatting tags that TCPDF's writeHTMLCell() supports.
+     *
+     * Contract:
+     *  - Tags that MUST be stripped entirely (with content): img, iframe, video,
+     *    audio, object, embed, script, style.
+     *  - Tags that MUST be preserved: p, strong, em, b, i, u, br, ul, ol, li.
+     *  - Plain text content MUST be present in the output.
+     *
+     * Background: element_helper::render_content() passes the string to TCPDF's
+     * writeHTMLCell(), which fully supports safe inline HTML. Stripping all tags
+     * would degrade formatted feedback (bold, paragraphs, lists) unnecessarily.
+     */
+    public function test_clean_for_pdf_strips_dangerous_keeps_safe_tags(): void {
+        $element = $this->get_test_element();
 
-        $course  = $this->getDataGenerator()->create_course();
-        $student = $this->getDataGenerator()->create_user();
-        $assign  = $this->getDataGenerator()->create_module('assign', ['course' => $course->id]);
+        // --- Dangerous tags must be removed entirely (including their content) ---
 
-        $gradeid = $DB->insert_record('assign_grades', [
-            'assignment' => $assign->id,
-            'userid'     => $student->id,
-            'timecreated'  => time(),
-            'timemodified' => time(),
-            'grader'     => 2,
-            'grade'      => 90.0,
-            'attemptnumber' => 0,
-        ]);
+        $imghtml = '<p>See diagram: <img src="data:image/png;base64,abc123" alt="chart" /></p>';
+        $result  = $this->call_clean_for_pdf($element, $imghtml);
+        $this->assertStringNotContainsString('<img',    $result, 'img tag must be stripped');
+        $this->assertStringNotContainsString('base64',  $result, 'base64 payload must be stripped');
+        $this->assertStringContainsString(   'See diagram:', $result, 'surrounding text must survive');
 
-        $DB->insert_record('assignfeedback_comments', [
-            'assignment'  => $assign->id,
-            'grade'       => $gradeid,
-            'commenttext' => '<p>Great <strong>work</strong>!</p>',
-            'commentformat' => FORMAT_HTML,
-        ]);
+        $iframehtml = '<p>Watch: <iframe src="https://evil.example/x"></iframe></p>';
+        $result     = $this->call_clean_for_pdf($element, $iframehtml);
+        $this->assertStringNotContainsString('<iframe', $result, 'iframe tag must be stripped');
 
-        $element = new element(new \stdClass());
-        $method  = new \ReflectionMethod($element, 'get_feedback_for_user');
-        $method->setAccessible(true);
+        $scripthtml = '<p>Hello</p><script>alert(1)</script>';
+        $result     = $this->call_clean_for_pdf($element, $scripthtml);
+        $this->assertStringNotContainsString('<script', $result, 'script tag must be stripped');
+        $this->assertStringNotContainsString('alert',   $result, 'script content must be stripped');
 
-        $result = $method->invoke($element, $assign->id, $student->id);
-        $this->assertEquals('Great work!', $result);
+        $stylehtml = '<style>.x{color:red}</style><p>Styled</p>';
+        $result    = $this->call_clean_for_pdf($element, $stylehtml);
+        $this->assertStringNotContainsString('<style',   $result, 'style tag must be stripped');
+        $this->assertStringNotContainsString('color:red', $result, 'style content must be stripped');
+
+        // --- Safe formatting tags must be preserved for TCPDF rendering ---
+
+        $safehtml = '<p>Great <strong>work</strong>!</p>';
+        $result   = $this->call_clean_for_pdf($element, $safehtml);
+        $this->assertStringContainsString('Great',      $result, 'plain text must survive');
+        $this->assertStringContainsString('work',       $result, 'plain text must survive');
+        // p and strong are in TCPDF\'s supported tag set — they must not be stripped.
+        $this->assertStringContainsString('<strong>',   $result, 'strong tag must be preserved for TCPDF');
+        $this->assertStringContainsString('<p>',        $result, 'p tag must be preserved for TCPDF');
+
+        $listhtml = '<ul><li>Point one</li><li>Point two</li></ul>';
+        $result   = $this->call_clean_for_pdf($element, $listhtml);
+        $this->assertStringContainsString('<ul>',       $result, 'ul tag must be preserved for TCPDF');
+        $this->assertStringContainsString('<li>',       $result, 'li tag must be preserved for TCPDF');
+        $this->assertStringContainsString('Point one',  $result, 'list text must survive');
+    }
+
+    /**
+     * Helper: invoke the protected clean_for_pdf() method via reflection.
+     *
+     * @param \customcertelement_assignfeedback\element $element
+     * @param string $html
+     * @return string
+     */
+    private function call_clean_for_pdf(
+        \customcertelement_assignfeedback\element $element,
+        string $html
+    ): string {
+        $ref    = new \ReflectionMethod($element, 'clean_for_pdf');
+        $ref->setAccessible(true);
+        return $ref->invoke($element, $html);
     }
 }
