@@ -8,24 +8,50 @@
 //
 // Moodle is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
+// along with Moodle. If not, see <https://www.gnu.org/licenses/>.
 
 /**
  * Language strings for customcertelement_assignfeedback.
  *
- * @package   customcertelement_assignfeedback
+ * @package customcertelement_assignfeedback
  * @copyright 2026 Joe Rebbeck <tjr@the-ela.com>
- * @license   https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ * @license https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 defined('MOODLE_INTERNAL') || die();
 
-$string['assignment']           = 'Assignment';
-$string['chooseassignment']     = 'Choose an assignment...';
+// Core element strings.
+$string['pluginname']        = 'Assignment feedback';
+$string['assignment']        = 'Assignment';
+$string['chooseassignment']  = 'Choose an assignment...';
+
+// Feedback placeholder strings.
+// Shown on the certificate when feedback cannot be rendered.
+
+// Displayed when mod_assign is uninstalled, the assignment record no longer
+// exists, or the user has never been graded on the assignment.
 $string['feedbacknotavailable'] = 'Feedback not available';
-$string['pluginname']           = 'Assignment feedback';
-$string['privacy:metadata']     = 'The assignment feedback element does not store any personal data.';
+
+// Displayed when the user has been graded but the grader has not yet written
+// any feedback comment (commenttext is empty).
+$string['nofeedbackprovided'] = 'No feedback provided';
+
+// Privacy API strings.
+$string['privacy:metadata:assign_grades']
+    = 'Feedback data retrieved from the Moodle assignment activity to display on the certificate.';
+$string['privacy:metadata:assign_grades:userid']
+    = 'The ID of the user whose feedback is displayed on the certificate.';
+$string['privacy:metadata:assign_grades:assignment']
+    = 'The assignment this grade record belongs to.';
+$string['privacy:metadata:assign_grades:grade']
+    = 'The grade value associated with the feedback.';
+$string['privacy:metadata:assignfeedback_comments']
+    = 'The feedback comment text rendered on the certificate.';
+$string['privacy:metadata:assignfeedback_comments:grade']
+    = 'The grade record this comment is linked to.';
+$string['privacy:metadata:assignfeedback_comments:commenttext']
+    = 'The textual feedback provided by the grader.';
